@@ -1,4 +1,4 @@
-name: Build SkyHawk Hybrid Recovery
+name: Build Hybrid SkyHawk Recovery
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update
-        sudo apt install -y python3-pip cpio gzip lz4 tar
+        sudo apt install -y python3-pip cpio gzip lz4 tar xz-utils
         pip install gdown
 
     - name: Download input files from Google Drive
@@ -32,30 +32,57 @@ jobs:
         mkdir extreme
         tar -xf extreme.tar -C extreme
 
-    - name: Extract SkyHawk ramdisk
+    - name: Extract SkyHawk ramdisk with auto-detect
       run: |
         cd work
+        # Split boot header (2048 bytes)
         dd if=skyhawk.img of=header bs=1 count=2048
-        dd if=skyhawk.img of=ramdisk.gz bs=1 skip=2048
-        gzip -d ramdisk.gz
+        dd if=skyhawk.img of=ramdisk.bin bs=1 skip=2048
+
+        # Detect compression type
+        file ramdisk.bin > comp.txt
+        cat comp.txt
+
+        if grep -q "LZ4" comp.txt; then
+          echo "Detected LZ4 compression"
+          lz4 -d ramdisk.bin ramdisk.cpio
+        elif grep -q "gzip" comp.txt; then
+          echo "Detected GZIP compression"
+          mv ramdisk.bin ramdisk.gz
+          gzip -d ramdisk.gz
+          mv ramdisk ramdisk.cpio
+        elif grep -q "XZ" comp.txt; then
+          echo "Detected XZ compression"
+          mv ramdisk.bin ramdisk.xz
+          xz -d ramdisk.xz
+          mv ramdisk ramdisk.cpio
+        else
+          echo "Unknown compression format"
+          exit 1
+        fi
+
+        # Extract ramdisk
         mkdir ramdisk
         cd ramdisk
-        cpio -idm < ../ramdisk
+        cpio -idm < ../ramdisk.cpio
 
-    - name: Inject Extreme compatibility files
+    - name: Inject compatibility files from Extreme
       run: |
-        cp work/extreme/recovery.fstab work/ramdisk/etc/recovery.fstab || true
-        cp work/extreme/init.rc work/ramdisk/init.rc || true
+        cd work
+        cp extreme/recovery.fstab ramdisk/etc/recovery.fstab || true
+        cp extreme/init.rc ramdisk/init.rc || true
+        echo "Injection complete."
 
-    - name: Repack recovery
+    - name: Repack hybrid recovery image
       run: |
-        cd work/ramdisk
+        cd work
+        cd ramdisk
         find . | cpio -o -H newc | gzip > ../new-ramdisk.gz
         cd ..
         cat header new-ramdisk.gz > recovery-hybrid.img
         mv recovery-hybrid.img $GITHUB_WORKSPACE/
 
-    - name: Upload Hybrid Recovery
+    - name: Upload Hybrid Recovery to GitHub Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: SkyHawk-Hybrid-Recovery
