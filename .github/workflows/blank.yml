@@ -1,4 +1,4 @@
-name: Build SkyHawk Hybrid Recovery
+name: Build SkyHawk Hybrid Recovery (IMG-only)
 
 on:
   workflow_dispatch:
@@ -13,58 +13,48 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt update
-        sudo apt install -y p7zip-full cpio binwalk unzip curl gzip lz4 android-sdk-libsparse-utils
+        sudo apt install -y p7zip-full cpio binwalk gzip lz4 android-sdk-libsparse-utils
 
     - name: Download recovery images
       run: |
         mkdir input
         curl -L -o input/extreme.img 'https://drive.google.com/uc?id=1mFfJwMXXEcDYf9yiJ87LKmsbmRNSKpgF&export=download'
-        curl -L -o input/skyhawk.zip 'https://drive.google.com/uc?id=1mKfk43jlNCBMh9jgFHejYAmML2-RYrss&export=download'
+        curl -L -o input/skyhawk.img 'https://drive.google.com/uc?id=1mKfk43jlNCBMh9jgFHejYAmML2-RYrss&export=download'
 
-    - name: Extract SkyHawk ZIP
-      run: |
-        mkdir skyhawk_zip
-        unzip input/skyhawk.zip -d skyhawk_zip
-        find skyhawk_zip -name "*.img" -exec mv {} skyhawk.img \;
-
-    - name: Extract SkyHawk Ramdisk
+    - name: Extract SkyHawk recovery
       run: |
         mkdir extracted_skyhawk
-        binwalk --extract --directory extracted_skyhawk skyhawk.img
-        RAMDISK=$(find extracted_skyhawk -type f -name '*.cpio*' | head -n 1)
-        if [ -z "$RAMDISK" ]; then echo "SkyHawk ramdisk not found"; exit 1; fi
-        cp "$RAMDISK" skyhawk_ramdisk.cpio
+        binwalk --extract --directory extracted_skyhawk input/skyhawk.img
+        SKYHAWK_RAMDISK=$(find extracted_skyhawk -type f -name '*.cpio*' | head -n 1)
         mkdir skyhawk_ramdisk
         cd skyhawk_ramdisk
-        cpio -idm < ../skyhawk_ramdisk.cpio
+        cpio -idm < "$GITHUB_WORKSPACE/$SKYHAWK_RAMDISK"
 
-    - name: Extract Extreme Ramdisk
+    - name: Extract Extreme recovery
       run: |
         mkdir extracted_extreme
         binwalk --extract --directory extracted_extreme input/extreme.img
-        RAMDISK=$(find extracted_extreme -type f -name '*.cpio*' | head -n 1)
-        if [ -z "$RAMDISK" ]; then echo "Extreme ramdisk not found"; exit 1; fi
-        cp "$RAMDISK" extreme_ramdisk.cpio
+        EXTREME_RAMDISK=$(find extracted_extreme -type f -name '*.cpio*' | head -n 1)
         mkdir extreme_ramdisk
         cd extreme_ramdisk
-        cpio -idm < ../extreme_ramdisk.cpio
+        cpio -idm < "$GITHUB_WORKSPACE/$EXTREME_RAMDISK"
 
-    - name: Merge Extreme files into SkyHawk
+    - name: Inject Extreme compatibility
       run: |
-        cp -r extreme_ramdisk/sbin skyhawk_ramdisk/ || true
+        cp -r extreme_ramdisk/sbin/* skyhawk_ramdisk/sbin/ || true
         cp -r extreme_ramdisk/res/* skyhawk_ramdisk/res/ || true
         cp -a extreme_ramdisk/*.rc skyhawk_ramdisk/ || true
         cp -a extreme_ramdisk/*.prop skyhawk_ramdisk/ || true
         cp -a extreme_ramdisk/fstab* skyhawk_ramdisk/ || true
 
-    - name: Repack new hybrid recovery
+    - name: Repack hybrid image
       run: |
         cd skyhawk_ramdisk
         find . | cpio -o -H newc | gzip > ../hybrid_ramdisk.cpio.gz
         cd ..
         mkdir out
         mkbootimg \
-          --kernel extracted_skyhawk/skyhawk.img.extracted/zImage \
+          --kernel extracted_skyhawk/input.skyhawk.img.extracted/zImage \
           --ramdisk hybrid_ramdisk.cpio.gz \
           --base 0x10000000 \
           --pagesize 2048 \
@@ -79,6 +69,6 @@ jobs:
         tag_name: hybrid-${{ github.run_number }}
         name: SkyHawk Hybrid Build ${{ github.run_number }}
         body: |
-          SkyHawk Hybrid recovery with Extreme ROM compatibility patch
+          Hybrid SkyHawk recovery using Extreme compatibility layer.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
