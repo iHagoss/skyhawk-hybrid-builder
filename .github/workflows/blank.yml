@@ -1,4 +1,4 @@
-name: Build Hybrid SkyHawk Recovery
+name: SkyHawk Hybrid Recovery Build
 
 on:
   workflow_dispatch:
@@ -6,68 +6,88 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Install dependencies
+    - name: Set up tools
       run: |
         sudo apt update
-        sudo apt install -y python3-pip binwalk cpio gzip lz4 tar xz-utils unzip
-        pip install gdown
+        sudo apt install -y p7zip-full cpio binwalk unzip curl gzip lz4 android-sdk-libsparse-utils
 
-    - name: Prepare working directory
-      run: mkdir -p work
-
-    - name: Download SkyHawk and Extreme TWRP from Google Drive
-      working-directory: work
+    - name: Download recovery images from Google Drive
       run: |
-        gdown --id 1mFfJwMXXEcDYf9yiJ87LKmsbmRNSKpgF -O skyhawk.img
-        gdown --id 1mG-6qnmANWZCdJEOMDEHvD5-wCVVLhCU -O extreme.tar
+        mkdir input
+        curl -L -o input/extreme.img 'https://drive.google.com/uc?id=1mFfJwMXXEcDYf9yiJ87LKmsbmRNSKpgF&export=download'
+        curl -L -o input/skyhawk.zip 'https://drive.google.com/uc?id=1mG-6qnmANWZCdJEOMDEHvD5-wCVVLhCU&export=download'
 
-    - name: Extract Extreme TWRP files
-      working-directory: work
+    - name: Extract SkyHawk ZIP
       run: |
-        mkdir extreme
-        tar -xf extreme.tar -C extreme
+        mkdir -p skyhawk_zip
+        unzip input/skyhawk.zip -d skyhawk_zip
+        mv skyhawk_zip/recovery.img skyhawk.img
 
-    - name: Extract SkyHawk ramdisk using binwalk
-      working-directory: work
+    - name: Extract SkyHawk Ramdisk
       run: |
-        mkdir extracted
-        binwalk --extract --directory extracted skyhawk.img
+        mkdir extracted_skyhawk
+        binwalk --extract --directory extracted_skyhawk skyhawk.img
 
-        RAMDISK=$(find extracted -type f -name '*.cpio*' | head -n 1)
+        RAMDISK=$(find extracted_skyhawk -type f -name '*.cpio*' | head -n 1)
         if [ -z "$RAMDISK" ]; then
-          echo "Failed to detect compressed ramdisk!"
+          echo "Failed to detect compressed SkyHawk ramdisk!"
           exit 1
         fi
-        cp "$RAMDISK" ramdisk.cpio
-        mkdir ramdisk
-        cd ramdisk
-        cpio -idm < ../ramdisk.cpio
+        cp "$RAMDISK" skyhawk_ramdisk.cpio
+        mkdir skyhawk_ramdisk
+        cd skyhawk_ramdisk
+        cpio -idm < ../skyhawk_ramdisk.cpio
 
-    - name: Inject Extreme compatibility files
-      working-directory: work
+    - name: Extract Extreme TWRP Ramdisk
       run: |
-        cp extreme/recovery.fstab ramdisk/etc/recovery.fstab || true
-        cp extreme/init.rc ramdisk/init.rc || true
-        echo "Injection complete."
+        mkdir extracted_extreme
+        binwalk --extract --directory extracted_extreme input/extreme.img
 
-    - name: Repack hybrid image with SkyHawk header
-      working-directory: work
+        RAMDISK=$(find extracted_extreme -type f -name '*.cpio*' | head -n 1)
+        if [ -z "$RAMDISK" ]; then
+          echo "Failed to detect Extreme ramdisk!"
+          exit 1
+        fi
+        cp "$RAMDISK" extreme_ramdisk.cpio
+        mkdir extreme_ramdisk
+        cd extreme_ramdisk
+        cpio -idm < ../extreme_ramdisk.cpio
+
+    - name: Merge Compatibility from Extreme
       run: |
-        # Extract SkyHawk header
-        dd if=skyhawk.img of=header bs=1 count=2048
-        cd ramdisk
-        find . | cpio -o -H newc | gzip > ../new-ramdisk.gz
+        cp -r extreme_ramdisk/sbin skyhawk_ramdisk/
+        cp -r extreme_ramdisk/res/* skyhawk_ramdisk/res/ || true
+        cp -a extreme_ramdisk/*.rc skyhawk_ramdisk/
+        cp -a extreme_ramdisk/*.prop skyhawk_ramdisk/
+        cp -a extreme_ramdisk/fstab* skyhawk_ramdisk/ || true
+
+    - name: Repack and Compress Image
+      run: |
+        cd skyhawk_ramdisk
+        find . | cpio -o -H newc | gzip > ../hybrid_ramdisk.cpio.gz
         cd ..
-        cat header new-ramdisk.gz > recovery-hybrid.img
-        mv recovery-hybrid.img $GITHUB_WORKSPACE/
+        mkdir out
+        mkbootimg \
+          --kernel extracted_skyhawk/skyhawk.img.extracted/zImage \
+          --ramdisk hybrid_ramdisk.cpio.gz \
+          --base 0x10000000 \
+          --pagesize 2048 \
+          --cmdline "androidboot.hardware=exynos9820 console=ttyS0,115200n8" \
+          -o out/hybrid_skyhawk.img
 
-    - name: Upload recovery image to GitHub Artifacts
-      uses: actions/upload-artifact@v4
+        7z a out/hybrid_skyhawk.7z out/hybrid_skyhawk.img
+
+    - name: Upload to GitHub Release
+      uses: softprops/action-gh-release@v2
       with:
-        name: SkyHawk-Hybrid-Recovery
-        path: recovery-hybrid.img
+        files: out/hybrid_skyhawk.7z
+        tag_name: skyhawk-hybrid-${{ github.run_number }}
+        name: SkyHawk Hybrid Build ${{ github.run_number }}
+        body: |
+          SkyHawk Hybrid Recovery (based on your files from Google Drive).
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
